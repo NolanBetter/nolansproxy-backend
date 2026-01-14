@@ -1,121 +1,144 @@
-import fetch from 'node-fetch';
+const express = require('express');
+const fetch = require('node-fetch');
+const cors = require('cors');
+const app = express();
 
+// Enable CORS for your domain
+app.use(cors({
+  origin: ['https://www.nolansproxy.com', 'http://localhost:3000', 'http://127.0.0.1:5500'],
+  credentials: true
+}));
+
+// Proxy endpoint with X-Frame-Options and CSP bypass
 app.get('/api/proxy', async (req, res) => {
+  const url = req.query.url;
+  
+  if (!url) {
+    return res.status(400).json({ error: 'URL parameter required' });
+  }
+
   try {
-    const url = req.query.url;
-
-    if (!url) {
-      return res.status(400).json({ error: 'URL parameter required' });
-    }
-
-    // ✅ Validate URL
-    let targetUrl;
-    try {
-      targetUrl = new URL(url);
-    } catch {
-      return res.status(400).json({ error: 'Invalid URL' });
-    }
-
-    // ❌ Block unsafe protocols
-    if (!['http:', 'https:'].includes(targetUrl.protocol)) {
-      return res.status(400).json({ error: 'Unsupported protocol' });
-    }
-
-    console.log('Proxying:', targetUrl.href);
-
-    const response = await fetch(targetUrl.href, {
+    console.log('Proxying:', url);
+    
+    const response = await fetch(url, {
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Accept': '*/*'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
       },
       redirect: 'follow'
     });
-
+    
     const contentType = response.headers.get('content-type') || '';
-
-    // 🚫 Headers that CRASH Vercel
-    const blockedHeaders = [
+    
+    // CRITICAL: Remove headers that block iframe embedding
+    const headersToRemove = [
       'x-frame-options',
       'content-security-policy',
-      'content-security-policy-report-only',
-      'content-encoding',
-      'transfer-encoding',
-      'connection'
+      'x-content-security-policy',
+      'content-security-policy-report-only'
     ];
-
+    
+    // Copy headers but exclude blocking ones
+    const allowedHeaders = {};
     response.headers.forEach((value, key) => {
-      if (!blockedHeaders.includes(key.toLowerCase())) {
-        res.setHeader(key, value);
+      if (!headersToRemove.includes(key.toLowerCase())) {
+        allowedHeaders[key] = value;
       }
     });
-
-    // ✅ Allow iframe + CORS
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    
+    // Set headers that allow iframe embedding
+    res.set(allowedHeaders);
+    res.setHeader('Content-Security-Policy', "frame-ancestors *");
     res.setHeader('X-Frame-Options', 'ALLOWALL');
-
-    // ===== HTML =====
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    
+    // Handle HTML
     if (contentType.includes('text/html')) {
       let html = await response.text();
-
-      // Remove CSP meta tags
+      
+      // Remove any CSP meta tags from HTML
       html = html.replace(
-        /<meta[^>]+http-equiv=["']Content-Security-Policy["'][^>]*>/gi,
+        /<meta[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/gi,
         ''
       );
-
-      const baseUrl = targetUrl.href;
-
-      // Rewrite links
+      
+      // Basic URL rewriting
+      const baseUrl = new URL(url);
+      
+      // Rewrite absolute and relative URLs
       html = html.replace(
         /(href|src|action)=["']([^"']+)["']/gi,
         (match, attr, link) => {
           try {
-            if (
-              link.startsWith('data:') ||
-              link.startsWith('javascript:') ||
-              link.startsWith('mailto:') ||
-              link.startsWith('#')
-            ) {
+            if (link.startsWith('data:') || link.startsWith('javascript:') || link.startsWith('mailto:') || link.startsWith('#')) {
               return match;
             }
-
-            const absolute = new URL(link, baseUrl).href;
-            return `${attr}="/api/proxy?url=${encodeURIComponent(absolute)}"`;
-          } catch {
+            
+            const absoluteUrl = new URL(link, baseUrl).href;
+            return `${attr}="/api/proxy?url=${encodeURIComponent(absoluteUrl)}"`;
+          } catch (e) {
             return match;
           }
         }
       );
-
-      // Rewrite CSS url()
+      
+      // Rewrite CSS url() references
       html = html.replace(
         /url\(["']?([^"')]+)["']?\)/gi,
         (match, link) => {
           try {
             if (link.startsWith('data:')) return match;
-            const absolute = new URL(link, baseUrl).href;
-            return `url("/api/proxy?url=${encodeURIComponent(absolute)}")`;
-          } catch {
+            const absoluteUrl = new URL(link, baseUrl).href;
+            return `url("/api/proxy?url=${encodeURIComponent(absoluteUrl)}")`;
+          } catch (e) {
             return match;
           }
         }
       );
-
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      return res.send(html);
+      
+      res.setHeader('Content-Type', 'text/html');
+      res.send(html);
+    } 
+    else {
+      const buffer = await response.buffer();
+      res.setHeader('Content-Type', contentType);
+      res.send(buffer);
     }
-
-    // ===== NON-HTML =====
-    const buffer = Buffer.from(await response.arrayBuffer());
-    res.setHeader('Content-Type', contentType);
-    res.send(buffer);
-
-  } catch (err) {
-    console.error('Proxy error:', err);
-    res.status(500).json({
-      error: 'Proxy failed',
-      message: err.message
+    
+  } catch (error) {
+    console.error('Proxy error:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch URL', 
+      message: error.message 
     });
   }
 });
+
+// Health check
+app.get('/api', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: "Nolan's Proxy Backend is running!",
+    features: [
+      'X-Frame-Options bypass',
+      'CSP modification',
+      'URL rewriting'
+    ]
+  });
+});
+
+// For Vercel
+module.exports = app;
+
+// For local testing
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
