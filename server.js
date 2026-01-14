@@ -1,0 +1,111 @@
+const express = require('express');
+   const fetch = require('node-fetch');
+   const cors = require('cors');
+   const app = express();
+
+   // Enable CORS for your domain
+   app.use(cors({
+     origin: ['https://www.nolansproxy.com', 'http://localhost:3000', 'http://127.0.0.1:5500'],
+     credentials: true
+   }));
+
+   // Proxy endpoint
+   app.get('/api/proxy', async (req, res) => {
+     const url = req.query.url;
+     
+     if (!url) {
+       return res.status(400).json({ error: 'URL parameter required' });
+     }
+
+     try {
+       console.log('Proxying:', url);
+       
+       const response = await fetch(url, {
+         headers: {
+           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+           'Accept-Language': 'en-US,en;q=0.5',
+           'Accept-Encoding': 'gzip, deflate, br',
+           'DNT': '1',
+           'Connection': 'keep-alive',
+           'Upgrade-Insecure-Requests': '1'
+         },
+         redirect: 'follow'
+       });
+       
+       const contentType = response.headers.get('content-type') || '';
+       
+       // Handle HTML
+       if (contentType.includes('text/html')) {
+         let html = await response.text();
+         
+         // Basic URL rewriting
+         const baseUrl = new URL(url);
+         
+         // Rewrite absolute and relative URLs
+         html = html.replace(
+           /(href|src|action)=["']([^"']+)["']/gi,
+           (match, attr, link) => {
+             try {
+               if (link.startsWith('data:') || link.startsWith('javascript:') || link.startsWith('mailto:') || link.startsWith('#')) {
+                 return match;
+               }
+               
+               const absoluteUrl = new URL(link, baseUrl).href;
+               return `${attr}="/api/proxy?url=${encodeURIComponent(absoluteUrl)}"`;
+             } catch (e) {
+               return match;
+             }
+           }
+         );
+         
+         // Rewrite CSS url() references
+         html = html.replace(
+           /url\(["']?([^"')]+)["']?\)/gi,
+           (match, link) => {
+             try {
+               if (link.startsWith('data:')) return match;
+               const absoluteUrl = new URL(link, baseUrl).href;
+               return `url("/api/proxy?url=${encodeURIComponent(absoluteUrl)}")`;
+             } catch (e) {
+               return match;
+             }
+           }
+         );
+         
+         res.setHeader('Content-Type', 'text/html');
+         res.send(html);
+       } 
+       else {
+         const buffer = await response.buffer();
+         res.setHeader('Content-Type', contentType);
+         res.send(buffer);
+       }
+       
+     } catch (error) {
+       console.error('Proxy error:', error);
+       res.status(500).json({ 
+         error: 'Failed to fetch URL', 
+         message: error.message 
+       });
+     }
+   });
+
+   // Health check
+   app.get('/api', (req, res) => {
+     res.json({ 
+       status: 'ok', 
+       message: "Nolan's Proxy Backend is running!" 
+     });
+   });
+
+   // For Vercel
+   module.exports = app;
+
+   // For local testing
+   if (require.main === module) {
+     const PORT = process.env.PORT || 3000;
+     app.listen(PORT, () => {
+       console.log(`Server running on http://localhost:${PORT}`);
+     });
+   }
