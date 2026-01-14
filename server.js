@@ -1,31 +1,47 @@
+import fetch from 'node-fetch';
+
 app.get('/api/proxy', async (req, res) => {
-  const url = req.query.url;
-
-  if (!url) {
-    return res.status(400).json({ error: 'URL parameter required' });
-  }
-
   try {
-    console.log('Proxying:', url);
+    const url = req.query.url;
 
-    const response = await fetch(url, {
+    if (!url) {
+      return res.status(400).json({ error: 'URL parameter required' });
+    }
+
+    // ✅ Validate URL
+    let targetUrl;
+    try {
+      targetUrl = new URL(url);
+    } catch {
+      return res.status(400).json({ error: 'Invalid URL' });
+    }
+
+    // ❌ Block unsafe protocols
+    if (!['http:', 'https:'].includes(targetUrl.protocol)) {
+      return res.status(400).json({ error: 'Unsupported protocol' });
+    }
+
+    console.log('Proxying:', targetUrl.href);
+
+    const response = await fetch(targetUrl.href, {
       headers: {
         'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept':
-          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5'
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept': '*/*'
       },
       redirect: 'follow'
     });
 
     const contentType = response.headers.get('content-type') || '';
 
-    // Remove blocking headers
+    // 🚫 Headers that CRASH Vercel
     const blockedHeaders = [
       'x-frame-options',
       'content-security-policy',
-      'content-security-policy-report-only'
+      'content-security-policy-report-only',
+      'content-encoding',
+      'transfer-encoding',
+      'connection'
     ];
 
     response.headers.forEach((value, key) => {
@@ -34,21 +50,21 @@ app.get('/api/proxy', async (req, res) => {
       }
     });
 
-    // Allow iframe + CORS
+    // ✅ Allow iframe + CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Security-Policy', 'frame-ancestors *');
+    res.setHeader('X-Frame-Options', 'ALLOWALL');
 
-    // ===== HTML HANDLING =====
+    // ===== HTML =====
     if (contentType.includes('text/html')) {
       let html = await response.text();
 
       // Remove CSP meta tags
       html = html.replace(
-        /<meta[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/gi,
+        /<meta[^>]+http-equiv=["']Content-Security-Policy["'][^>]*>/gi,
         ''
       );
 
-      const baseUrl = new URL(url);
+      const baseUrl = targetUrl.href;
 
       // Rewrite links
       html = html.replace(
@@ -64,10 +80,8 @@ app.get('/api/proxy', async (req, res) => {
               return match;
             }
 
-            const absoluteUrl = new URL(link, baseUrl).href;
-            return `${attr}="/api/proxy?url=${encodeURIComponent(
-              absoluteUrl
-            )}"`;
+            const absolute = new URL(link, baseUrl).href;
+            return `${attr}="/api/proxy?url=${encodeURIComponent(absolute)}"`;
           } catch {
             return match;
           }
@@ -80,8 +94,8 @@ app.get('/api/proxy', async (req, res) => {
         (match, link) => {
           try {
             if (link.startsWith('data:')) return match;
-            const absoluteUrl = new URL(link, baseUrl).href;
-            return `url("/api/proxy?url=${encodeURIComponent(absoluteUrl)}")`;
+            const absolute = new URL(link, baseUrl).href;
+            return `url("/api/proxy?url=${encodeURIComponent(absolute)}")`;
           } catch {
             return match;
           }
@@ -92,16 +106,16 @@ app.get('/api/proxy', async (req, res) => {
       return res.send(html);
     }
 
-    // ===== NON-HTML (images, js, css) =====
+    // ===== NON-HTML =====
     const buffer = Buffer.from(await response.arrayBuffer());
     res.setHeader('Content-Type', contentType);
     res.send(buffer);
 
-  } catch (error) {
-    console.error('Proxy error:', error);
+  } catch (err) {
+    console.error('Proxy error:', err);
     res.status(500).json({
-      error: 'Failed to fetch URL',
-      message: error.message
+      error: 'Proxy failed',
+      message: err.message
     });
   }
 });
